@@ -233,6 +233,7 @@ class CorpusRetriever:
                 "title":       doc["title"],
                 "content":     doc["content"][:1800],
                 "score":       float(scores[idx]),
+                "path":        doc["path"],
                 "_global_idx": int(idx),
             })
         return results

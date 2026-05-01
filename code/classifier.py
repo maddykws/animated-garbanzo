@@ -219,3 +219,78 @@ def detect_multi_intent(issue: str) -> bool:
     Used to signal Claude to address all intents in one response.
     """
     return bool(_MULTI_INTENT_RE.search(issue))
+
+
+# ── Benign-invalid early-reply detection ──────────────────────────────────────
+#
+# Some 'invalid' tickets are not adversarial and not distress signals — they are
+# pleasantries (thanks, greetings) or off-topic questions ("what's the actor in
+# Iron Man?"). The sample ground truth replies to these with a brief canned
+# message rather than escalating. Without this branch, the agent over-escalates:
+# pleasantries fail retrieval -> answerability check fails -> generic escalation.
+
+# Pleasantries — anchored with $ so "Thanks, but I still need help with X" does
+# NOT match. The optional trailing clause only allows further pleasantry words.
+_BENIGN_THANKS_RE     = re.compile(
+    r"^\s*(thank you|thanks|thank u|thx|ty)"
+    r"(\s+(for\s+(your\s+|the\s+|all\s+(your\s+|the\s+)?)?"
+    r"(help|helping|assistance|support|reply|response|info|information)"
+    r"(\s+(me|us|everyone|earlier|today|so far))?"
+    r"|so much|a lot|a bunch|again|much|everyone))?"
+    r"[\s,!.]*$",
+    re.IGNORECASE,
+)
+_BENIGN_GREETING_RE   = re.compile(
+    r"^\s*(hi|hello|hey|good (morning|afternoon|evening))"
+    r"[\s,!.\-]{0,5}(there|team|support)?"
+    r"[\s,!.]*$",
+    re.IGNORECASE,
+)
+_BENIGN_ACK_RE        = re.compile(
+    r"^\s*(ok|okay|got it|noted|understood|sure|alright|cool|great)"
+    r"[\s,!.]{0,5}(thanks|thank you|thank u)?"
+    r"[\s,!.]*$",
+    re.IGNORECASE,
+)
+# Off-topic factual / creative-task questions. Narrow on purpose: a false
+# positive here would hide a real support request, so we only match phrasings
+# the corpus cannot plausibly answer. Excludes "director" / "ceo" / "president"
+# since those collide with legitimate corporate-role questions.
+_BENIGN_OFFTOPIC_RE   = re.compile(
+    r"\bwhat is (the name of )?the (actor|movie|song|book|capital city)\b"
+    r"|\bwho (is|was) the (actor|main character) (in|of)\b"
+    r"|\btell me a joke\b|\bsing me a song\b|\bwrite me a poem\b",
+    re.IGNORECASE,
+)
+
+
+def classify_benign_invalid(issue: str, subject: str = "") -> str | None:
+    """
+    Detect benign 'invalid' tickets that should get a brief canned reply
+    rather than being escalated. Returns one of:
+        'thanks' | 'greeting' | 'acknowledgment' | 'off_topic_question' | None
+
+    Only fires on tickets that are NOT distress signals and NOT adversarial
+    (the safety gate runs first and catches those).
+    """
+    body = (issue or "").strip()
+    subj = (subject or "").strip()
+    text_short = body if body else subj
+    if not text_short:
+        return None
+
+    # Order matters: thanks/ack patterns can also appear at the start of a
+    # longer ticket body, so cap to short messages only.
+    if len(text_short) <= 60 and _BENIGN_THANKS_RE.match(text_short):
+        return "thanks"
+    if len(text_short) <= 60 and _BENIGN_ACK_RE.match(text_short):
+        return "acknowledgment"
+    if len(text_short) <= 80 and _BENIGN_GREETING_RE.match(text_short):
+        return "greeting"
+
+    # Off-topic question — look across both fields so a benign body with a
+    # noisy subject ("Urgent, please help") still matches.
+    if _BENIGN_OFFTOPIC_RE.search(f"{subject} {issue}"):
+        return "off_topic_question"
+
+    return None
