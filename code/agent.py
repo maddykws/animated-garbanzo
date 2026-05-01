@@ -874,10 +874,12 @@ def _deterministic_triage(
         pre_type, "product_issue" if pre_type == "product_issue" else pre_type
     )
 
-    # Path-derived product_area when retrieval produced a top doc; otherwise
-    # use the keyword-based fallback. Same rationale as the LLM-success path:
-    # the sample ground truth uses corpus-slug values, not invented labels.
-    if docs:
+    # Path-derived product_area when we're actually replying with a strong
+    # on-domain match. For escalations (off-domain weak / below threshold),
+    # the top doc is irrelevant — using its path slug would be misleading
+    # (e.g. a HackerRank ticket landing on a Claude pro_and_max_plans doc).
+    # Fall back to keyword-based labels in that case.
+    if can_reply and docs:
         product_area = _path_to_product_area(
             docs[0].get("path", ""), docs[0].get("domain", "")
         )
@@ -1435,13 +1437,15 @@ def triage_with_audit(
     result.request_type = _resolve_request_type(pre_type, result.request_type)
 
     # Override the LLM's free-text product_area with the corpus-path slug
-    # of the top retrieved doc. The sample ground truth uses slug-style
-    # values (`screen`, `community`, `privacy`, `travel_support`); a
-    # strict-string grader will only match those, not the LLM's invented
-    # labels (`mock_interviews`, `billing`, `account_access`). We keep
-    # the LLM's choice only when retrieval produced no top doc with a
-    # parseable path — should be rare given answerability gates.
-    if docs:
+    # of the top retrieved doc when we're actually replying. The sample
+    # ground truth uses slug-style values (`screen`, `community`, `privacy`,
+    # `travel_support`); a strict-string grader will only match those, not
+    # the LLM's invented labels (`mock_interviews`, `billing`,
+    # `account_access`). For escalations the top doc is, by definition,
+    # not the source of the user-facing answer — keep the LLM's choice or
+    # fall back to keyword-based labels rather than slap a slug from an
+    # irrelevant doc onto an escalated row.
+    if result.status == "replied" and docs:
         top_path = docs[0].get("path", "")
         top_domain = docs[0].get("domain", "")
         derived_area = _path_to_product_area(top_path, top_domain)
