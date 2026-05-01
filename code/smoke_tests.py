@@ -15,7 +15,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from classifier import check_escalation, classify_request_type, detect_multi_intent
+from classifier import (
+    check_escalation,
+    classify_benign_invalid,
+    classify_request_type,
+    detect_multi_intent,
+)
 from retriever import CorpusRetriever
 
 REPO_ROOT = Path(__file__).parent.parent
@@ -122,6 +127,83 @@ def test_request_type_classification() -> None:
         classify_request_type("where can I find the certifications tab?") == "product_issue",
         "where-is-X navigation question should be product_issue",
     )
+
+
+# ── Benign-invalid early-reply tests ──────────────────────────────────────────
+
+def test_benign_invalid_classification() -> None:
+    """Pleasantries and off-topic trivia get a brief canned reply, not escalation."""
+    must_match = [
+        ("Thank you for helping me",        "thanks"),
+        ("thanks",                          "thanks"),
+        ("Thanks!",                         "thanks"),
+        ("thank you so much",               "thanks"),
+        ("Hi there",                        "greeting"),
+        ("Hello team",                      "greeting"),
+        ("Hello",                           "greeting"),
+        ("ok",                              "acknowledgment"),
+        ("got it, thanks",                  "acknowledgment"),
+        ("alright",                         "acknowledgment"),
+        ("What is the name of the actor in Iron Man?", "off_topic_question"),
+        ("Tell me a joke",                  "off_topic_question"),
+    ]
+    for text, expected_kind in must_match:
+        kind = classify_benign_invalid(text)
+        assert_true(
+            kind == expected_kind,
+            f"Benign-invalid: expected {expected_kind!r} for {text!r}, got {kind!r}",
+        )
+
+    # MUST NOT match — these are real support requests that happen to start
+    # with a polite word, or contain pleasantry words inside a real ask.
+    must_not_match = [
+        "Thanks, but I still cannot login to my Visa account",
+        "Hi, I cannot see the apply tab",
+        "Hello, my card was stolen in Lisbon",
+        "ok so my certificate name is wrong, can you fix it?",
+        "Who is the director of operations at Visa",       # corporate, not trivia
+        "How do I dispute a charge",                       # real support request
+        "it's not working, help",                          # vague distress, not benign
+    ]
+    for text in must_not_match:
+        kind = classify_benign_invalid(text)
+        assert_true(
+            kind is None,
+            f"Benign-invalid: should NOT match {text!r}, got {kind!r}",
+        )
+
+
+# ── Path-to-product_area derivation tests ────────────────────────────────────
+
+def test_path_to_product_area() -> None:
+    """The corpus path slug is the ground-truth taxonomy. Verify the mapping
+    matches sample-ground-truth values like `screen`, `community`, `privacy`,
+    `travel_support`, `general_support`."""
+    from agent import _path_to_product_area
+
+    cases = [
+        # (path, domain, expected_product_area)
+        ("data/hackerrank/screen/foo.md",                                "hackerrank", "screen"),
+        ("data/hackerrank/screen/sub/bar.md",                            "hackerrank", "screen"),
+        ("data/hackerrank/hackerrank_community/google-login.md",         "hackerrank", "community"),
+        ("data/hackerrank/interviews/zoom-connectivity.md",              "hackerrank", "interviews"),
+        ("data/hackerrank/general-help/policies.md",                     "hackerrank", "general_support"),
+        ("data/hackerrank/uncategorized/x.md",                           "hackerrank", "general_support"),
+        ("data/claude/privacy-and-legal/delete-conversation.md",         "claude",     "privacy"),
+        ("data/claude/claude-for-education/lti.md",                      "claude",     "claude_for_education"),
+        ("data/claude/amazon-bedrock/regions.md",                        "claude",     "amazon_bedrock"),
+        ("data/visa/support/consumer/travelers-cheques.md",              "visa",       "travel_support"),
+        ("data/visa/support/consumer/travel-support/exchange-rate.md",   "visa",       "travel_support"),
+        ("data/visa/support/consumer/visa-rules.md",                     "visa",       "general_support"),
+        ("data/visa/support/small-business/dispute-resolution.md",       "visa",       "merchant_support"),
+        ("",                                                              "hackerrank", "general_support"),
+    ]
+    for path, domain, expected in cases:
+        got = _path_to_product_area(path, domain)
+        assert_true(
+            got == expected,
+            f"_path_to_product_area({path!r}, {domain!r}) = {got!r}, expected {expected!r}",
+        )
 
 
 # ── Multi-intent detection tests ──────────────────────────────────────────────
@@ -243,16 +325,26 @@ def test_output_schema() -> None:
         parea    = _g(row, "Product Area", "product_area")
         just     = _g(row, "Justification", "justification")
 
-        assert_true(status in {"replied", "escalated"}, f"Row {i}: bad status={status!r}")
+        # Accept both lowercase (spec) and Title Case (sample-format) for status.
+        assert_true(
+            status.lower() in {"replied", "escalated"},
+            f"Row {i}: bad status={status!r}",
+        )
         assert_true(
             rtype in {"product_issue", "feature_request", "bug", "invalid"},
             f"Row {i}: bad request_type={rtype!r}",
         )
         assert_true(bool(response.strip()), f"Row {i}: missing response")
-        assert_true(bool(parea.strip()),    f"Row {i}: missing product_area")
         assert_true(bool(just.strip()),     f"Row {i}: missing justification")
 
-        if status == "replied":
+        # Benign-invalid rows (pleasantries) intentionally have no product_area
+        # and no 'Source:' — they mirror the sample ground truth's canned
+        # 'Happy to help' / 'out of scope' replies, which carry neither.
+        is_benign_invalid = (rtype == "invalid")
+        if not is_benign_invalid:
+            assert_true(bool(parea.strip()), f"Row {i}: missing product_area")
+
+        if status.lower() == "replied" and not is_benign_invalid:
             assert_true(
                 "Source:" in response,
                 f"Row {i}: replied response missing 'Source:' citation",
@@ -284,6 +376,8 @@ def main() -> None:
         ("classifier escalations",       test_classifier_escalations),
         ("classifier no-escalation",     test_classifier_no_escalation),
         ("request type classification",  test_request_type_classification),
+        ("benign-invalid classification", test_benign_invalid_classification),
+        ("path to product_area",          test_path_to_product_area),
         ("multi-intent detection",       test_multi_intent_detection),
         ("retrieval quality",            test_retrieval),
         ("cross-domain fallback",        test_cross_domain_fallback),
